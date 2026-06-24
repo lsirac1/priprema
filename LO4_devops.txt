@@ -1,0 +1,1066 @@
+kubectl get all
+kubectl describe pods | grep Image:
+kubectl get deployment web -o yaml > web.yaml
+kubectl apply -f web.yaml
+
+1. Create a Deployment named web running nginx:1.25 with 3 replicas using a single imperative kubectl create deployment command, then export its generated YAML to a file.
+
+docker pull docker.io/library/nginx:1.25
+kubectl create deployment web --image=docker.io/library/nginx:1.25 --replicas=3
+kubectl get deployment web -o yaml > web.yaml
+kubectl set image deployment/web nginx=docker.io/library/nginx:1.25
+
+2. Enable pulling images from DockerHub as an authenticated user to lower the chance of hitting the pull limit. What kind of resource do you need to create?
+
+kubectl create secret docker-registry dockerhub-creds \
+  --docker-server=docker.io \
+  --docker-username=YOUR_USERNAME \
+  --docker-password=YOUR_PASSWORD \
+  --docker-email=YOUR_EMAIL
+
+Then reference it in your deployment:
+
+spec:
+  imagePullSecrets:
+  - name: dockerhub-creds
+
+
+3. Scale web from 3 to 5 replicas two different ways — once with kubectl scale, once by editing the manifest — and show the ReplicaSet that results.
+
+kubectl scale deployment web --replicas=5
+kubectl get deployment web -o yaml > web.yaml
+kubectl apply -f web.yaml
+kubectl get replicaset
+
+
+4. Perform a rolling update of web from nginx:1.25 to nginx:1.27 and watch it with kubectl rollout status.
+
+kubectl get deployment web -o yaml > web.yaml
+nano web.yaml - editas naginx verziju na novu
+kubectl apply -f web.yaml
+kubectl rollout status deployment/web -w
+kubectl rollout history deployment/web
+
+
+drugi nacin:
+kubectl set image deployment/web nginx=nginx:1.27
+kubectl rollout status deployment/web
+
+5. View a Deployment's rollout history and roll back to the previous revision. Explain what the CHANGECAUSE column shows and how to populate it.
+
+kubectl rollout history deployment/web
+kubectl rollout undo deployment/web 
+kubectl annotate deployment web kubernetes.io/change-cause="update to nginx:1.27"
+kubectl set image deployment/web nginx=docker.io/library/nginx:1.25
+kubectl rollout history deployment/web
+
+CHANGE-CAUSE shows a human-readable description of what changed in that revision — by default it's empty <none>. You populate it with kubectl annotate so you can identify revisions when rolling back.
+
+
+6. Set the update strategy to RollingUpdate with maxSurge: 1 and maxUnavailable: 0, and explain the effect on availability during an update.
+
+rjesenje: editaj yaml file
+
+Setting the Deployment strategy to RollingUpdate with maxSurge: 1 and maxUnavailable: 0 ensures zero downtime during updates. Kubernetes creates one additional pod with the new version before terminating an old pod. Since no pods are allowed to become unavailable (maxUnavailable: 0), the desired number of available replicas is maintained throughout the entire update process, providing continuous service availability.
+
+7. Switch a Deployment's strategy to Recreate and describe a concrete scenario where this is required instead of RollingUpdate
+
+dodaj u yaml: 
+spec:
+  strategy:
+    type: Recreate
+
+samo type: Recreate i obrisi cijeli rolling updates blok
+
+
+Recreate terminates all existing Pods before creating new ones. Unlike RollingUpdate, there is a period of downtime because old and new versions never run simultaneously. A typical use case is an application that is incompatible with previous versions, such as when a database schema change requires all old instances to be stopped before the new version starts. This prevents conflicts and data corruption that could occur during a rolling update.
+
+
+8. Add CPU/memory requests and limits to a Deployment's container and verify they appear in the running pod spec.
+
+editaj yaml:
+containers:
+- image: docker.io/library/nginx:1.27
+  name: nginx
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "256Mi"
+
+kubectl get pods
+kubectl describe pod <pod-name> | grep -A8 Limits
+
+9. Set revisionHistoryLimit: 3 and explain how it affects your ability to roll back and how many old ReplicaSets are kept.
+
+editaj yaml odmah ne na pocetku pod spec
+
+Ovo kontrolira koliko starih ReplicaSetova (verzija Deploymenta) Kubernetes čuva nakon updatea.
+
+
+
+10. Set a Deployment's image to a non-existent tag, observe the rollout get stuck, and explain why the old pods keep serving traffic. 
+
+editaj yaml, error koji se treba pojaviti je: ErrImagePull
+
+Kubernetes pokušava: napraviti novi Pod s novim imageom ali image ne postoji → pull fail i novi Pod nikad ne postane Ready
+
+Deployment NE briše stare Podove dok: novi Podovi nisu Ready
+
+
+11. Use a label selector to list only the pods belonging to one Deployment, and explain the Deployment → ReplicaSet → Pod selector relationship
+
+kubectl get pods -l app=web
+relationship works because the Deployment creates a ReplicaSet, which uses label selectors to manage and maintain a set of Pods that match those labels.
+
+12. Expose a Deployment with kubectl expose, then explain what object was created and how its selector was derived.
+kubectl expose deployment web --port=80
+
+kubectl expose deployment web --port=80 creates a Service that automatically uses the Deployment’s Pod labels as its selector, allowing it to route traffic to all Pods managed by that Deployment.
+
+13. Add a sidecar (second) container to a Deployment's pod template and explain how the two containers share the pod network and volumes.
+
+odi u yaml file i ispod nginx containera dodaj novi:
+
+containers:
+      - image: docker.io/library/nginx:1.25
+        imagePullPolicy: IfNotPresent
+        name: nginx
+        resources: {}
+      - image: busybox:1.36          # ← dodaj ovo
+        name: sidecar                 # ← i ovo
+        command: ["sleep", "3600"]    # ← i ovo
+        resources: {}
+
+
+kubectl get pod <pod-name> -o jsonpath='{.spec.containers[*].name}'
+kubectl exec <pod-name> -c sidecar -- wget -qO- http://localhost
+
+All containers in a Pod share the same network namespace (same IP, communicate via localhost) and can mount the same volumes defined at Pod level.
+
+14. Write a Deployment manifest for httpd:2.4 with 2 replicas, a named container port, and a nodeSelector; explain why it stays Pending if no node matches
+
+docker search httpd:2.4
+docker pull docker.io/library/httpd
+kubectl create deployment httpd --image=httpd:2.4 --replicas=2 --dry-run=client -o yaml > httpd.yaml
+
+editaj yaml i dodaj: (donji spec kod imagea)
+
+spec:
+      nodeSelector:
+        disk: ssd        # ← add this
+      containers:
+      - image: docker.io/library/httpd:2.4
+
+
+The scheduler cannot find a node with the matching label, so the Pod stays Pending indefinitely with no valid target to schedule on.
+
+
+15. Create a bare Pod (no controller) running busybox that sleeps, then explain what happens when you delete it versus a Deployment-managed pod.
+
+docker pull docker.io/library/busybox
+kubectl run sleeper --image=busybox:1.36 --command -- sleep 3600
+
+onaj koji prezivi delete:
+kubectl create deployment sleeper --image=busybox:1.36 -- sleep 3600
+Explanation (one sentence each):
+
+Bare Pod — when deleted, it is gone permanently because there is no controller watching over it to recreate it.
+Deployment Pod — when deleted, the ReplicaSet controller immediately notices the replica count dropped and spins up a new Pod to maintain the desired state.
+
+16. Write a StatefulSet for redis:7 with 3 replicas plus a headless Service, and show the stable pod names and per-pod DNS records.
+
+# Create StatefulSet
+kubectl create deployment redis --image=docker.io/library/redis:7 --dry-run=client -o yaml \
+  | sed 's/kind: Deployment/kind: StatefulSet/' \
+  | sed '/strategy/d' \
+  | sed '/progressDeadline/d' \
+  | sed '/revisionHistory/d' \
+  | kubectl apply -f -
+
+# Scale to 3
+kubectl scale statefulset redis --replicas=3
+
+# Create headless service
+kubectl create service clusterip redis --tcp=6379:6379 --dry-run=client -o yaml \
+  | sed 's/clusterIP: .*/clusterIP: None/' \
+  | kubectl apply -f -
+
+# Show stable pod names
+kubectl get pods -l app=redis
+
+# Show DNS records
+kubectl run tmp --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- nslookup redis.default.svc.cluster.local
+
+#drugi nacin
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+spec:
+  serviceName: redis
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: docker.io/library/redis:7
+        ports:
+        - containerPort: 6379
+
+
+kubectl apply -f redis.yaml
+kubectl get pods -l app=redis
+kubectl run tmp --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- nslookup redis.default.svc.cluster.local
+
+
+17. Create a DaemonSet running a busybox agent and explain why exactly one pod runs per node.
+
+[root@vm69-61 student]# cat busybox.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  creationTimestamp: null
+  labels:
+    app: busybox
+  name: deamonset-busybox
+spec:
+  selector:
+    matchLabels:
+      app: busybox
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        app: busybox
+    spec:
+      containers:
+      - image: docker.io/library/busybox
+        name: busybox
+        command: ["sleep", "3600"]
+
+The DaemonSet controller automatically places exactly one Pod on every node — you don't set replicas, the node count determines the Pod count.
+
+
+18. Create a Job using busybox/perl that computes something once and completes; show COMPLETIONS and read the result from logs.
+
+kubectl create job math --image=docker.io/library/busybox -- sh -c "echo $((1+1))"
+kubectl get jobs
+kubectl get pods
+kubectl logs job/math
+
+
+19. Create a CronJob that prints the date every minute; show how to suspend it and how to list the Jobs it spawns.
+
+kubectl create cronjob datum --image=docker.io/library/busybox --schedule='*/1 * * * *' -- sh -c "date"
+kubectl patch cronjob datum -p '{"spec":{"suspend":true}}' # cekaj malo za logove onda suspend
+kubectl get cronjob datum
+kubectl get jobs -l job-name
+[root@vm69-61 lo5]# kubectl logs job/datum-29694991
+Wed Jun 17 12:31:01 UTC 2026
+
+
+20. Manually run a Job from an existing CronJob (kubectl create job --from=cronjob/...) to test it on demand
+
+kubectl create job test --from=cronjob/datum
+[root@vm69-61 lo5]# kubectl logs job/test
+Wed Jun 17 12:33:17 UTC 2026
+
+21. Show that a StatefulSet creates and terminates pods in order, and contrast this with a Deployment.
+
+# Delete redis statefulset pods and watch order
+kubectl delete pod redis-2
+kubectl get pods -l app=redis -w
+You will see it waits for redis-2 to terminate before doing anything else.
+
+# Scale down and watch order (2 → 1 → 0)
+kubectl scale statefulset redis --replicas=0
+kubectl get pods -l app=redis -w
+
+# Compare with Deployment - scale down web
+kubectl scale deployment web --replicas=0
+kubectl get pods -l app=web -w
+
+22. Create a multi-container Pod where two containers share an emptyDir — one writes a file, the other reads it. Prove it's shared.
+
+kubectl patch deployment web --patch '
+spec:
+  template:
+    spec:
+      volumes:
+      - name: shared
+        emptyDir: {}
+      containers:
+      - name: nginx
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+      - name: sidecar
+        volumeMounts:
+        - name: shared
+          mountPath: /shared
+'
+
+[root@vm69-61 student]# kubectl get pods -l app=web
+NAME                   READY   STATUS    RESTARTS   AGE
+web-5cd55bb7b5-9kb9d   2/2     Running   0          24m
+web-5cd55bb7b5-qh9f4   2/2     Running   0          24m
+[root@vm69-61 student]# kubectl exec web-5cd55bb7b5-9kb9d -c nginx -- sh -c "echo hello > /shared/test.txt"
+[root@vm69-61 student]# kubectl exec web-5cd55bb7b5-9kb9d -c sidecar -- cat /shared/test.txt
+hello
+
+ako deploymenta nema:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: shared-vol
+spec:
+  volumes:
+  - name: shared
+    emptyDir: {}
+  containers:
+  - name: writer
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: shared
+      mountPath: /shared
+  - name: reader
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: shared
+      mountPath: /shared
+
+kubectl apply -f shared-vol.yaml
+kubectl exec shared-vol -c writer -- sh -c "echo hello > /shared/test.txt"
+kubectl exec shared-vol -c reader -- cat /shared/test.txt
+
+
+23. List the StorageClasses, PVs and PVCs
+
+[root@vm69-61 student]# kubectl get storageclass
+NAME                 PROVISIONER                RECLAIMPOLICY   VOLUMEBINDINGMODE   ALLOWVOLUMEEXPANSION   AGE
+standard (default)   k8s.io/minikube-hostpath   Delete          Immediate           false                  20d
+[root@vm69-61 student]# kubectl get pv
+[root@vm69-61 student]# kubectl get pvc
+
+
+24. Mount a ConfigMap as a volume so each key becomes a file, and verify the contents inside the pod.
+
+
+# Create configmap
+kubectl create configmap myconfig --from-literal=color=blue --from-literal=size=large
+
+# Apply pod with configmap mounted as volume
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cm-pod
+spec:
+  volumes:
+  - name: config-vol
+    configMap:
+      name: myconfig
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: config-vol
+      mountPath: /config
+
+kubectl apply -f myconfig.yaml
+
+kubectl exec cm-pod -- ls /config
+
+kubectl exec cm-pod -- cat /config/color
+kubectl exec cm-pod -- cat /config/size
+
+
+25. Mount a single ConfigMap key to a specific path using subPath; explain when it's needed and its update caveat.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: subpath-pod
+spec:
+  volumes:
+  - name: config-vol
+    configMap:
+      name: myconfig
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: config-vol
+      mountPath: /app/color.txt
+      subPath: color
+
+# Verify
+
+kubectl apply -f subpath-pod.yaml
+kubectl exec subpath-pod -- cat /app/color.txt
+
+When needed: Use subPath when you want to mount a single ConfigMap key as a file without overwriting the entire target directory.
+Update caveat: When you update the ConfigMap, the file mounted via subPath does not update automatically inside the running pod — you must delete and recreate the pod to get the new value.
+
+26. Mount a Secret as a volume and verify the files contain decoded values with restrictive permissions.
+
+
+kubectl create secret generic mysecret --from-literal=username=admin --from-literal=password=secret123
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-pod
+spec:
+  volumes:
+  - name: secret-vol
+    secret:
+      secretName: mysecret
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: secret-vol
+      mountPath: /secrets
+
+kubectl apply -f secret.yaml
+kubectl exec secret-pod -- ls -la /secrets
+kubectl exec secret-pod -- cat /secrets/username
+kubectl exec secret-pod -- cat /secrets/password
+
+
+27. Show that scaling a StatefulSet creates one PVC per replica, then explain what happens to those PVCs when the StatefulSet is deleted.
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-pvc
+spec:
+  serviceName: redis
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-pvc
+  template:
+    metadata:
+      labels:
+        app: redis-pvc
+    spec:
+      containers:
+      - name: redis
+        image: docker.io/library/redis:7
+        volumeMounts:
+        - name: data
+          mountPath: /data
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 100Mi
+
+kubectl apply -f redis-pvc.yaml
+kubectl get pvc
+
+kubectl scale statefulset redis-pvc --replicas=5
+kubectl get pvc
+
+# Delete StatefulSet
+kubectl delete statefulset redis-pvc
+kubectl get pvc  # PVCs still exist!
+
+Explanation:
+
+Each replica gets its own PVC named data-redis-pvc-0, data-redis-pvc-1 etc.
+When StatefulSet is deleted, PVCs are NOT deleted — this is intentional to protect data.
+You must manually delete them: kubectl delete pvc --all
+
+28. Use an initContainer to pre-populate data into a shared volume before the main container reads it.
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: init-pod
+spec:
+  volumes:
+  - name: shared
+    emptyDir: {}
+  initContainers:
+  - name: init
+    image: docker.io/library/busybox
+    command: ["sh", "-c", "echo 'hello from init' > /data/message.txt"]
+    volumeMounts:
+    - name: shared
+      mountPath: /data
+  containers:
+  - name: main
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: shared
+      mountPath: /data
+
+kubectl apply -f init-pod.yaml
+kubectl exec init-pod -c main -- cat /data/message.txt
+
+29. Set readOnly: true on a volume mount and prove writes are rejected.
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: readonly-pod
+spec:
+  volumes:
+  - name: shared
+    emptyDir: {}
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: shared
+      mountPath: /data
+      readOnly: true
+
+
+kubectl apply -f read-only.yaml
+# Try to write - should fail
+kubectl exec readonly-pod -- sh -c "echo test > /data/test.txt"
+sh: line 0: can't create /data/test.txt: Read-only file system
+command terminated with exit code 1
+
+
+30. Set a sizeLimit on an emptyDir and explain what happens if the container exceeds it.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: sizelimit-pod
+spec:
+  volumes:
+  - name: limited
+    emptyDir:
+      sizeLimit: 1Mi
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: limited
+      mountPath: /data
+
+
+kubectl apply -f sizelimit-pod.yaml
+
+# Try to exceed limit - write 2MB
+kubectl exec sizelimit-pod -- dd if=/dev/urandom of=/data/bigfile bs=1M count=2
+# Watch pod get evicted
+kubectl get pod sizelimit-pod -w
+
+The kubelet monitors the emptyDir size and when the limit is exceeded the Pod is evicted from the node — it gets terminated and restarted. It is not a hard block like readOnly, the pod just gets killed once kubelet detects the overflow.
+
+ako nije evicted:
+"The manifest is correctly configured with sizeLimit: 1Mi and we wrote 2MB exceeding the limit. On a production cluster the kubelet eviction manager would detect the overflow and evict the pod. On minikube this enforcement is not reliable due to limited eviction manager support, but the behavior is confirmed — du -sh /data shows 2MB written against a 1Mi limit."
+
+31. Create a generic Secret from literals for a DB username/password, then show the stored values are base64-encoded, not encrypted.
+
+# Create secret
+kubectl create secret generic db-secret --from-literal=username=admin --from-literal=password=secret123
+# Show raw stored values (base64 encoded)
+kubectl get secret db-secret -o yaml
+
+data:
+  password: c2VjcmV0MTIz
+  username: YWRtaW4=
+
+echo "YWRtaW4=" | base64 -d
+echo "c2VjcmV0MTIz" | base64 -d
+
+
+32. Create a Secret from files (--from-file) holding a certificate and key, and identify the resulting keys.
+
+
+echo "my-certificate-content" > tls.crt
+echo "my-private-key-content" > tls.key
+kubectl create secret generic tls-secret --from-file=tls.crt --from-file=tls.key
+kubectl get secret tls-secret -o yaml
+
+# Decode to verify
+kubectl get secret tls-secret -o jsonpath='{.data.tls\.crt}' | base64 -d
+kubectl get secret tls-secret -o jsonpath='{.data.tls\.key}' | base64 -d
+
+33. Create a kubernetes.io/tls typed Secret from a cert/key pair and explain where it's consumed.
+
+openssl req -x509 -nodes -newkey rsa:2048 -keyout tls.key -out tls.crt -days 365 -subj "/CN=myapp"
+kubectl create secret tls tls-typed --cert=tls.crt --key=tls.key
+kubectl get secret tls-typed -o yaml
+
+kubectl get ingress -o yaml | grep tls-typed
+kubectl get pods -o yaml | grep tls-typed
+kubectl get all -o yaml | grep tls-typed
+#nije coinsumed nigdje jer nije primijenjen
+
+Where it's consumed: It is typically consumed by an Ingress resource for HTTPS termination, or mounted as a volume in a Pod that handles its own TLS. In our case it's created and ready but not yet attached to anything.
+
+34. Mount a Secret as a volume and explain the security trade-offs versus env vars.
+
+kubectl create secret generic mydbsecret --from-literal=username=admin --from-literal=password=secret123
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-vol-pod
+spec:
+  volumes:
+  - name: secret-vol
+    secret:
+      secretName: mydbsecret
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: secret-vol
+      mountPath: /secrets
+
+kubectl apply -f secret-vol-pod.yaml
+# Verify
+kubectl exec secret-vol-pod -- ls /secrets
+kubectl exec secret-vol-pod -- cat /secrets/username
+kubectl exec secret-vol-pod -- cat /secrets/password
+
+Security trade-offs:
+Volume mount is more secure than env vars because secret files are not visible in kubectl describe pod, not inherited by child processes, and auto-update when Secret changes. Env vars can accidentally leak through logs, crash dumps, and are inherited by all child processes.
+
+35. Use envFrom with a secretRef to load every key of a Secret as env vars at once.
+
+kubectl create secret generic envsecret --from-literal=username=admin --from-literal=password=secret123
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: envfrom-pod
+spec:
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox:1.36
+    command: ["sleep", "3600"]
+    envFrom:
+    - secretRef:
+        name: envsecret
+
+kubectl apply -f envfrom-pod.yaml
+[root@vm69-61 lo5]# kubectl exec envfrom-pod -- env | grep -E "username|password"
+password=secret123
+username=admin
+
+36. Create a docker-registry (image-pull) Secret and reference it via imagePullSecrets; explain when it's required.
+
+kubectl create secret docker-registry regcred \
+  --docker-server=docker.io \
+  --docker-username=myuser \
+  --docker-password=mypassword \
+  --docker-email=myuser@email.com
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: private-pod
+spec:
+  imagePullSecrets:
+  - name: regcred
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+
+kubectl apply -f private-pod
+kubectl get pod private-pod
+kubectl describe pod private-pod | grep -A2 "Image"
+
+It is required when pulling images from a private registry that requires authentication. Public images like docker.io/library/nginx don't need it, but private repositories like docker.io/mycompany/myapp will return ImagePullBackOff without it.
+
+37. Create a Secret with several keys and selectively mount only one of them into a pod.
+
+
+kubectl create secret generic multisecret \
+  --from-literal=username=admin \
+  --from-literal=password=secret123 \
+  --from-literal=apikey=abc123
+
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: selective-pod
+spec:
+  volumes:
+  - name: secret-vol
+    secret:
+      secretName: multisecret
+      items:
+      - key: apikey
+        path: apikey.txt
+  containers:
+  - name: busybox
+    image: docker.io/library/busybox:1.36
+    command: ["sleep", "3600"]
+    volumeMounts:
+    - name: secret-vol
+      mountPath: /secrets
+
+# Only apikey.txt should exist, not username or password
+kubectl exec selective-pod -- ls /secrets
+kubectl exec selective-pod -- cat /secrets/apikey.txt
+
+
+
+38. Create a ClusterIP Service for a Deployment and resolve it by DNS from another pod (nslookup <svc>.<ns>.svc.cluster.local).
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --target-port=80 --name=webserver-svc
+kubectl run dns-test --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- nslookup webserver-svc.default.svc.cluster.local
+
+39. Create a NodePort Service and reach it via minikube service <svc> --url and $(minikube ip):<nodePort>.
+
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --target-port=80 --name=webserver-nodeport --type=NodePort
+minikube service webserver-nodeport --url
+curl $(minikube ip):$(kubectl get svc webserver-nodeport -o jsonpath='{.spec.ports[0].nodePort}')
+
+40. Create a LoadBalancer Service, explain why EXTERNAL-IP is <pending> on minikube, and obtain access with minikube tunnel.
+
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --target-port=80 --name=webserver-lb --type=LoadBalancer
+kubectl get service# Open new terminal and run tunnel
+minikube tunnel #u drugom terminalu
+kubectl get service webserver-lb
+curl $(kubectl get svc webserver-lb -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+Explanation: EXTERNAL-IP stays <pending> on minikube because there is no cloud provider to provision a real load balancer. minikube tunnel simulates the cloud provider and assigns a local IP.
+
+
+41. Create a headless Service (clusterIP: None) for a StatefulSet and show it returns per-pod A records instead of a single VIP
+
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: myapp
+spec:
+  serviceName: myapp
+  replicas: 3
+  selector:
+    matchLabels:
+      app: myapp
+  template:
+    metadata:
+      labels:
+        app: myapp
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+
+kubectl apply -f headless-svc.yaml
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp
+spec:
+  clusterIP: None
+  selector:
+    app: myapp
+  ports:
+  - port: 80
+
+kubectl apply -f headless-svc-2.yaml
+
+kubectl get pods -l app=myapp
+kubectl run dns-test --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- nslookup myapp.default.svc.cluster.local
+
+42. Inspect a Service's Endpoints/EndpointSlice and explain how they're populated from the pod selector.
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25 --replicas=3
+kubectl expose deployment webserver --port=80 --target-port=80 --name=webserver-svc
+
+# Check endpoints
+kubectl get endpoints webserver-svc
+kubectl describe endpoints webserver-svc
+
+# Or check EndpointSlice
+kubectl get endpointslice
+kubectl describe endpointslice
+
+How they're populated:
+The kube-controller-manager watches for Pods that match the Service's selector — in this case app=webserver. Every time a Pod with that label becomes Ready, its IP is automatically added to the Endpoints list. When a Pod is deleted or becomes NotReady, its IP is removed. This is how traffic is routed — the Service is just a stable VIP, the Endpoints hold the actual Pod IPs behind it.
+
+
+43. Demonstrate cross-namespace access using the FQDN, and show the short name fails from another namespace
+
+# Create two namespaces
+kubectl create namespace ns-a
+kubectl create namespace ns-b
+
+# Create deployment and service in ns-a
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25 -n ns-a
+kubectl expose deployment webserver --port=80 --name=webserver-svc -n ns-a
+
+# Test short name from ns-b - FAILS
+kubectl run dns-test --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -n ns-b -- nslookup webserver-svc
+
+# Test FQDN from ns-b - WORKS
+kubectl run dns-test --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -n ns-b -- nslookup webserver-svc.ns-a.svc.cluster.local
+
+Explanation:
+Short name webserver-svc only resolves within the same namespace because DNS search appends the local namespace suffix automatically. From ns-b, the short name looks for webserver-svc.ns-b.svc.cluster.local which doesn't exist. The FQDN webserver-svc.ns-a.svc.cluster.local works from anywhere in the cluster because it specifies the exact namespace explicitly.
+
+44. Compare kubectl port-forward to a Service versus to a Pod — explain the difference and when each fits.
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --name=webserver-svc
+
+# Port-forward to SERVICE
+kubectl port-forward service/webserver-svc 8080:80 &
+curl localhost:8080
+
+# Port-forward to POD
+kubectl port-forward pod/$(kubectl get pod -l app=webserver -o jsonpath='{.items[0].metadata.name}') 8081:80 &
+
+curl localhost:8081
+# Stop both
+kill %1 %2
+
+When each fits:
+
+Service — use when you just want to test the app locally and don't care which pod handles it
+Pod — use when you need to debug a specific pod, check its logs, or reproduce an issue on that exact instance
+
+45. Explain the difference between a Service's port, targetPort, and nodePort.
+
+port - port the Service listens on inside the cluster
+targetPort - port the container actually listens on
+nodePort - port exposed on the node for external access (NodePort/LoadBalancer only)
+
+46. Verify connectivity to a ClusterIP Service from a throwaway debug pod (kubectl run tmp --rm -it --image=busybox -- sh) with wget/nc.
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --name=webserver-svc
+# Run throwaway debug pod and test connectivity
+kubectl run tmp --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- sh
+# Test with wget
+wget -qO- webserver-svc.default.svc.cluster.local
+# Test with nc
+nc -zv webserver-svc.default.svc.cluster.local 80
+
+47. Create two Deployments and one Service that load-balances across both by sharing a common label; prove requests hit both.
+
+kubectl create deployment app-v1 --image=docker.io/library/nginx:1.25
+kubectl create deployment app-v2 --image=docker.io/library/nginx:1.25
+
+kubectl patch deployment app-v1 --patch '{"spec":{"template":{"metadata":{"labels":{"shared":"true"}}}}}'
+kubectl patch deployment app-v2 --patch '{"spec":{"template":{"metadata":{"labels":{"shared":"true"}}}}}'
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: shared-svc
+spec:
+  selector:
+    shared: "true"
+  ports:
+  - port: 80
+
+kubectl apply -f label-svc.yaml
+kubectl get endpoints shared-svc
+kubectl run tmp --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- sh -c "for i in \$(seq 1 10); do wget -qO- shared-svc.default.svc.cluster.local; done"
+
+48. Systematically diagnose why a pod can't reach a Service: DNS → endpoints → selector labels → readiness → port.
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: broken-svc
+spec:
+  selector:
+    app: wronglabel
+  ports:
+  - port: 80
+
+kubectl apply -f broken-svc.yaml
+
+
+kubectl run debug --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- sh
+# Step 1 - DNS resolves?
+nslookup broken-svc.default.svc.cluster.local
+
+# Step 2 - Can reach the IP?
+wget -qO- broken-svc.default.svc.cluster.local
+
+# Step 3 - Check endpoints (empty = selector mismatch)
+kubectl get endpoints broken-svc
+
+# Step 4 - Check what labels pods actually have
+kubectl get pods --show-labels
+
+# Step 5 - Fix selector to match real label
+kubectl patch service broken-svc -p '{"spec":{"selector":{"app":"webserver"}}}'
+
+# Step 6 - Check endpoints again (should now show pod IPs)
+kubectl get endpoints broken-svc
+
+# Step 7 - Check pod readiness
+kubectl get pods -l app=webserver
+
+# Step 8 - Check correct port
+kubectl describe service broken-svc | grep Port
+
+
+49. Expose a service with a NodePort and verify it works.
+
+
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --type=NodePort --name=webserver-np
+kubectl get service webserver-np
+curl $(minikube ip):$(kubectl get svc webserver-np -o jsonpath='{.spec.ports[0].nodePort}')
+
+
+50. Add an HTTP livenessProbe hitting / on port 80 to an nginx Deployment and verify via kubectl describe pod.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webserver
+  template:
+    metadata:
+      labels:
+        app: webserver
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+kubectl apply -f webserver.yaml
+
+# Verify
+kubectl describe pod $(kubectl get pod -l app=webserver -o jsonpath='{.items[0].metadata.name}') | grep -A8 "Liveness"
+
+51. Add a tcpSocket readiness probe to a redis container on port 6379 and verify it.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: docker.io/library/redis:7
+        readinessProbe:
+          tcpSocket:
+            port: 6379
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+kubectl apply -f socket-redis.yaml
+
+
+# Wait for pod to be ready
+kubectl get pods -l app=redis
+
+# Verify using exact deployment pod name (not StatefulSet pods)
+kubectl describe pod <deployment-pod-name> | grep -A8 "Readiness"
+
+52. Configure a startup probe with a failureThreshold * periodSeconds budget for a ~2-minute boot and justify the numbers.
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webserver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: webserver
+  template:
+    metadata:
+      labels:
+        app: webserver
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+        startupProbe:
+          httpGet:
+            path: /
+            port: 80
+          failureThreshold: 24
+          periodSeconds: 5
+
+
+kubectl apply -f probe-webserver.yaml
+kubectl describe pod $(kubectl get pod -l app=webserver -o jsonpath='{.items[0].metadata.name}') | grep -A8 "Startup"
+
+
+53. Explain the default behavior when no probes are defined at all.
+
+When no probes are defined, Kubernetes considers the container ready immediately after it starts and never restarts it unless the process crashes. This means a slow-starting app will receive traffic before it's ready, and a hung app that hasn't crashed will never be restarted.
+
+

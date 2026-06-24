@@ -1,0 +1,1006 @@
+podman ps -a (bez a flaga pokazuje samo running)
+podman ps -a --format "{{.Names}}" - imena kontejnera
+podman logs web
+podman port web
+podman inspect festive_shamir --format '{{.State.ExitCode}}'
+
+
+80 (left) is always host port and right (8080) is always pod port -p HOST:CONTAINER
+
+
+1. podman run -d --name web -p 80:8080 docker.io/library/nginx
+(nginx listens on 80; the site isn't reachable on the host port you expected — what's reversed?)
+
+fix:
+podman rm -f web
+podman run -d --name web -p 8080:80 docker.io/library/nginx
+curl http://localhost:8080 
+
+
+2. podman run -d --name db -e MYSQL_ROOT_PASSWORD docker.io/library/mysql
+(the container exits during init — inspect podman logs.)
+
+podman logs db
+# You need to specify one of MYSQL_ROOT_PASSWORD, MYSQL_ALLOW_EMPTY_PASSWORD, MYSQL_RANDOM_ROOT_PASSWORD
+
+fix:
+podman rm db
+podman run -d --name db -e MYSQL_ROOT_PASSWORD=secret docker.io/library/mysql
+
+
+3. podman run -d --name app --network host -p 8080:80 docker.io/library/nginx
+(why is the -p flag effectively ignored here?)
+
+With --network host the container shares the host's network stack directly — it has no separate network namespace. So nginx is already on the host on port 80, and there is nothing to map.
+
+4. podman run -d --name c1 docker.io/library/busybox
+(the container goes straight to Exited (0) — why, and how do you keep it running?)
+BusyBox has no default long-running command — it starts, has nothing to do, and exits immediately with code 0 (success, not a crash).
+
+podman inspect c1 --format '{{.State.ExitCode}}'
+# shows: 0  → clean exit, not a crash
+# Check logs — empty, confirms no error
+podman logs c1
+fix:
+podman rm c1
+podman run -d --name c1 docker.io/library/busybox sleep 3600
+
+# Verify running
+podman ps
+
+5. podman run --rm -d --name job docker.io/library/alpine echo hello
+(then podman logs job fails — explain the --rm + detached gotcha.)
+
+--rm removes the container as soon as it finishes, and echo hello finishes in milliseconds — so by the time you run podman logs job the container is already gone.
+bez rm falag vidjet ce se logovi
+
+podman run -d --name job docker.io/library/alpine echo hello
+podman logs job  # shows: hello
+
+6. podman run -d -p 8080:80 --memory 8m docker.io/library/mysql
+(the database never becomes healthy — what limit is the problem?)
+
+fix:
+
+podman inspect festive_shamir --format '{{.State.ExitCode}}' #137 error code znaci da je out of memory za pokretanje kontejnera
+podman run -d -p 3306:3306 --memory 512m -e MYSQL_ROOT_PASSWORD=secret docker.io/library/mysql
+
+
+7. podman run -d --name a docker.io/library/alpine sleep 1d
+podman run -d --name b docker.io/library/alpine sleep 1d
+podman exec a ping b
+(name resolution fails — why, on the default network, and how do you fix it?)
+
+default network has no dns
+
+fix:
+podman network create mynet
+podman run -d --name a --network mynet docker.io/library/alpine sleep 1d
+podman run -d --name b --network mynet docker.io/library/alpine sleep 1d
+
+# Now name resolution works
+podman exec a ping b
+
+
+8. podman run -d --name web -v ./html:/usr/share/nginx/html docker.io/library/nginx
+(the files aren't visible in the container, or SELinux denies access — what mount flag is missing?)
+
+
+# Fix
+podman run -d --name web -v ./html:/usr/share/nginx/html:z docker.io/library/nginx
+
+Yes, :z is the answer — it's the SELinux relabeling flag that allows the container to access the host directory.
+getenforce
+setenforce 0
+
+
+9. For each Containerfile/Dockerfile: identify the mistake, fix it, and explain what was wrong.
+
+
+10. 
+
+FROM debian:12
+RUN apt-get install -y nginx
+(the build fails to find the package — what's missing before install?)
+
+Explanation: apt-get install failed because the local package index was never refreshed — without apt-get update first, apt doesn't know nginx exists in the repositories. Running update before install fixes it.
+
+nano Containerfile
+
+[root@vm69-61 10]# cat Containerfile
+FROM debian:12
+RUN apt-get update -y
+RUN apt-get install -y nginx
+
+podman build .
+
+
+11. 
+
+FROM python:3.11
+COPY app.py /app/app.py
+WORKDIR /app
+CMD python app.py
+(the app starts but doesn't handle signals / can't be stopped cleanly — shell vs exec form?)
+
+
+fix:
+FROM python:3.11
+COPY app.py /app/app.py
+WORKDIR /app
+CMD ["python", "app.py"]
+
+Mistake: CMD python app.py is shell form — runs as /bin/sh -c "python app.py", so PID 1 is the shell, not python. SIGTERM never reaches the app.
+
+12. 
+
+FROM node:20
+COPY . /app
+WORKDIR /app
+RUN npm install
+(every source change triggers a full npm install — reorder for layer caching.)
+
+Explanation: Original order copies all source files first, so any code change invalidates the cache and forces npm install to rerun. Copying package.json first means npm install only reruns when dependencies actually change.
+
+fix:
+FROM node:20
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm install
+COPY . /app
+
+
+echo '{"name":"app","version":"1.0","dependencies":{}}' > package.json
+touch package-lock.json
+echo "console.log('hello')" > index.js
+
+podman build .
+
+
+13. 
+
+FROM alpine:3.20
+ENV PATH=/app/bin
+RUN apk add --no-cache curl
+(after this, curl/sh aren't found — what did setting PATH break?)
+
+Explanation: ENV PATH=/app/bin completely replaces the existing PATH, wiping out /usr/bin, /bin etc. — so even basic commands like sh and curl can't be found. Appending :$PATH preserves the original system paths while adding the new one.
+
+fix:
+FROM alpine:3.20
+ENV PATH=/app/bin:$PATH
+RUN apk add --no-cache curl
+
+14.
+
+FROM ubuntu:24.04
+EXPOSE 8080
+CMD ["python3", "-m", "http.server", "3000"]
+
+Explanation: EXPOSE 8080 documents port 8080, but the app actually listens on 3000 — mismatch. Fixed by changing the http.server port to match 8080.
+
+fix:
+FROM ubuntu:24.04
+EXPOSE 8080
+CMD ["python3", "-m", "http.server", "8080"]
+
+
+15. 
+(you map -p 8080:8080 but nothing answers — what mismatch is there, and what does EXPOSE actually do?)
+
+Mismatch: you map host 8080 → container 8080, but the app inside listens on 3000 (from task 14). So nothing answers on container port 8080.
+
+fix:
+# Fix — map to the actual port the app listens on
+podman run -d -p 8080:3000 <image>
+
+16. 
+
+FROM debian:12
+RUN apt-get update && apt-get install -y build-essential
+(the image is huge — how do you cut the size in the same layer?)
+
+fix:
+FROM debian:12
+RUN apt-get update && apt-get install -y build-essential \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+Why same layer: each RUN creates a new layer. If you clean in a separate RUN, the package cache is already saved in the previous layer — cleanup has no effect on size. Same layer means cache never gets committed to the image.
+
+
+17. 
+
+FROM python:3.11
+USER appuser
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
+(permission denied errors — what's wrong with the USER/COPY ordering and ownership?)
+
+Explanation: Original switches to appuser before COPY, but /app is owned by root — appuser has no write permission when pip install tries to use that directory. Fix: copy as root with --chown to set correct ownership, then switch to appuser only after the file is properly owned.
+
+fix:
+FROM python:3.11
+RUN adduser appuser
+COPY --chown=appuser:appuser requirements.txt /app/requirements.txt
+USER appuser
+RUN pip install -r /app/requirements.txt
+
+
+18. 
+
+FROM golang:1.22
+COPY . /src
+WORKDIR /src
+RUN go build -o app .
+CMD ["/src/app"]
+(the final image is ~1 GB — how would a multi-stage build fix it?)
+
+fix:
+
+FROM golang:1.22 AS builder
+COPY . /src
+WORKDIR /src
+RUN go build -o app .
+
+FROM alpine:3.20
+COPY --from=builder /src/app /app
+CMD ["/app"]
+
+# Create main.go
+cat > main.go << 'EOF'
+package main
+
+import "fmt"
+
+func main() {
+    fmt.Println("hello")
+}
+EOF
+
+# Create go.mod
+go mod init myapp
+
+# Now build
+podman build .
+
+19. A pod is stuck Pending. Walk through the diagnosis with kubectl describe pod and identify the reason from the events (scheduling / resources / PVC / nodeSelector)
+
+# Create a pod that will be Pending (wrong nodeSelector)
+kubectl run pending-pod --image=docker.io/library/nginx:1.25 --dry-run=client -o yaml > pending-pod.yaml
+kubectl apply -f pending-pod.yaml
+
+# Diagnose
+kubectl get pod pending-pod
+# STATUS: Pending
+
+kubectl describe pod pending-pod
+# Read Events at bottom — will show one of:
+# - 0/1 nodes available: node(s) didn't match nodeSelector
+# - 0/1 nodes available: Insufficient cpu/memory
+# - 0/1 nodes available: pod has unbound PVC
+
+fix:
+# nodeSelector mismatch
+kubectl label node minikube disk=ssd
+
+# Insufficient resources — lower requests in yaml
+resources:
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+# PVC not found — create the PVC
+kubectl apply -f pvc.yaml
+
+ako ga vec ima i nije u pending onda:
+# Remove the label
+kubectl label node minikube disk-
+
+# Delete and recreate pod
+kubectl delete pod pending-pod
+kubectl apply -f pending-pod.yaml
+
+# Now check
+kubectl get pod pending-pod
+kubectl describe pod pending-pod | grep -A5 Events
+
+20. Find a deployment from older tasks, remove a couple of spaces and try to deploy it. Identify the cause in the error messages and fix it.
+
+kubectl create deployment web --image=docker.io/library/nginx:1.25 --replicas=3
+kubectl get deployment web -o yaml > broken.yaml
+kubectl delete deployment web
+obrisi 2 razmaka ispod nginx:25 imagea gdje ime pocinje
+- image: docker.io/library/nginx:1.25
+name: nginx
+
+error message will be shown: 
+error converting YAML to JSON: yaml: line 23: mapping values are not allowed in this context
+Line number tells you exactly where the indentation is broken.
+
+
+21. A pod is in ImagePullBackOff. Diagnose the cause (image typo, missing tag, private registry without pull secret) and fix it
+
+# Create pod with wrong image
+kubectl run bad-image --image=docker.io/library/nginxxxxx:1.25
+kubectl get pod bad-image
+# STATUS: ImagePullBackOff
+# Diagnose
+kubectl describe pod bad-image | grep -A10 Events
+# Events will show:
+# Failed to pull image: manifest unknown / not found
+# Fix — correct the image
+kubectl set image pod/bad-image bad-image=docker.io/library/nginx:1.25
+kubectl get pod bad-image
+
+
+22. A pod is in CrashLoopBackOff. Use kubectl logs --previous to read the last crash and fix the root cause.
+
+
+# Create pod that will crashloop — no sleep command
+kubectl run crashloop --image=docker.io/library/busybox
+# Check status
+kubectl get pod crashloop
+# STATUS: CrashLoopBackOff
+# Diagnose — read current logs
+kubectl logs crashloop
+# Read previous crash logs
+kubectl logs crashloop --previous
+# Describe for more details
+kubectl describe pod crashloop | grep -A10 Events
+# Fix — give it a command
+kubectl delete pod crashloop
+kubectl run crashloop --image=docker.io/library/busybox -- sleep 3600
+# Verify
+kubectl get pod crashloop
+
+23. A pod's last state shows OOMKilled. Confirm it from kubectl get pod -o yaml / describe, then fix it (raise the memory limit or fix the app).
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: oom-pod
+spec:
+  containers:
+  - name: oom
+    image: docker.io/library/busybox
+    command: ["sh", "-c", "tail /dev/zero"]
+    resources:
+      limits:
+        memory: 5Mi
+
+kubectl apply -f oom-pod.yaml
+kubectl get pod oom-pod
+kubectl get pod oom-pod -o yaml | grep -A5 lastState
+kubectl describe pod oom-pod | grep -i oom
+
+samo promijeni 5Mi u 128Mi
+kubectl get pod oom-pod
+
+24. A Deployment's pods never become Ready. Trace it to a failing readiness probe and correct the probe or the app
+
+
+# Create deployment with wrong readiness probe path
+kubectl create deployment unready --image=docker.io/library/nginx:1.25
+
+kubectl patch deployment unready --patch '
+spec:
+  template:
+    spec:
+      containers:
+      - name: nginx
+        readinessProbe:
+          httpGet:
+            path: /wrongpath
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5'
+
+# Check — pods never become Ready
+kubectl get pods -l app=unready
+# READY: 0/1
+
+# Diagnose
+kubectl describe pod <pod> | grep -A10 Readiness
+kubectl describe pod <pod> | grep -A10 Events
+# Events show: Readiness probe failed: HTTP probe failed with statuscode: 404
+
+# Fix — correct the path
+kubectl patch deployment unready --patch '
+spec:
+  template:
+    spec:
+      containers:
+      - name: nginx
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5'
+
+# Verify
+kubectl get pods -l app=unready
+# READY: 1/1
+
+
+25. A Service returns nothing. Diagnose a Service/pod label mismatch using kubectl get endpoints.
+
+kubectl create deployment myapp --image=docker.io/library/nginx:1.25
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: myapp-svc
+spec:
+  selector:
+    app: wronglabel
+  ports:
+  - port: 80
+
+kubectl apply -f wronglabel.yaml
+kubectl get endpoints myapp-svc
+# ENDPOINTS: <none>
+kubectl describe service myapp-svc | grep Selector
+kubectl get pods --show-labels
+kubectl patch service myapp-svc -p '{"spec":{"selector":{"app":"myapp"}}}'
+kubectl get endpoints myapp-svc
+# ENDPOINTS: 10.x.x.x:80
+
+
+26. Given a manifest where spec.selector.matchLabels doesn't match spec.template.metadata.labels, explain the error kubectl apply returns and fix it
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-selector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wrong        # mismatch
+  template:
+    metadata:
+      labels:
+        app: correct    # different
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+
+kubectl apply -f broken-manifest.yaml
+The Deployment "broken-selector" is invalid: spec.template.metadata.labels: Invalid value: map[string]string{"app":"correct"}: `selector` does not match template `labels`
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: broken-selector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: correct
+  template:
+    metadata:
+      labels:
+        app: correct
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+
+Explanation: selector.matchLabels tells the Deployment which pods to manage — if it doesn't match template.metadata.labels Kubernetes rejects it immediately because the Deployment would never find its own pods.
+
+27. Given a manifest whose resources.requests exceed any node's capacity, explain why the pod is Pending (Insufficient cpu/memory) and fix it.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: toobig-pod
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+    resources:
+      requests:
+        cpu: 100
+        memory: 100Gi
+
+kubectl apply -f too-big.pod.yaml
+kubectl get pod too-big-pod
+# STATUS: Pending
+# Diagnose
+kubectl describe pod toobig-pod | grep -A10 Events
+# 0/1 nodes are available: Insufficient cpu, Insufficient memory
+# Check node capacity
+kubectl describe node minikube | grep -A10 Capacity
+smanji memoriju i cpu
+
+Explanation: requests is what the scheduler uses to find a node with enough free resources. If no node has 100 CPUs and 100Gi RAM available the pod stays Pending indefinitely — it's never killed, just waiting for capacity that doesn't exist.
+
+28. Given a pod mounting a PVC that doesn't exist, diagnose the FailedMount/Pending and create the PVC.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: pvc-pod
+spec:
+  volumes:
+  - name: mydata
+    persistentVolumeClaim:
+      claimName: missing-pvc
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+    volumeMounts:
+    - name: mydata
+      mountPath: /data
+
+kubectl apply -f pvc-pod.yaml
+kubectl get pod pvc-pod
+kubectl describe pod pvc-pod | grep -A10 Events
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: missing-pvc
+spec:
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 1Gi
+
+kubectl apply -f make-pvc.yaml
+kubectl get pod pvc-pod
+kubectl get pvc
+
+
+29. A container based on ubuntu with no long-running command shows Completed/CrashLoopBackOff. Explain why and add a proper command.
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-pod
+spec:
+  containers:
+  - name: ubuntu
+    image: docker.io/library/ubuntu
+
+kubectl apply -f no-command.yaml
+kubectl get pod ubuntu-pod
+kubectl logs ubuntu-pod
+# empty — nothing ran
+kubectl describe pod ubuntu-pod | grep -A5 Events
+
+kubectl delete pod ubuntu-pod
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ubuntu-pod
+spec:
+  containers:
+  - name: ubuntu
+    image: docker.io/library/ubuntu
+    command: ["sleep", "3600"]
+
+Explanation: Ubuntu has no default long-running process — it starts, has nothing to do and exits with code 0 (Completed). Kubernetes then tries to restart it repeatedly → CrashLoopBackOff. Adding sleep 3600 keeps the container alive.
+
+30. Use kubectl get events --sort-by=.lastTimestamp (or kubectl events) to triage everything that happened to a pod over time
+
+
+# Create a pod that will have some events
+kubectl run event-pod --image=docker.io/library/nginx:1.25
+# Get all events sorted by time
+kubectl get events --sort-by=.lastTimestamp
+# Filter events for specific pod
+kubectl get events --field-selector involvedObject.name=event-pod
+# Or use kubectl events (newer syntax)
+kubectl events --for pod/event-pod
+# Watch events live
+kubectl get events --sort-by=.lastTimestamp -w
+
+
+31. Use kubectl exec -it to get a shell in a pod and debug DNS with nslookup and cat /etc/resolv.conf
+
+
+kubectl run debug-pod --image=docker.io/library/busybox:1.36 -- sleep 3600
+kubectl exec -it debug-pod -- sh
+# Inside pod:
+# Check DNS config
+cat /etc/resolv.conf
+# shows:
+# nameserver 10.96.0.10      <- cluster DNS (CoreDNS)
+# search default.svc.cluster.local svc.cluster.local cluster.local
+# Test DNS resolution
+nslookup kubernetes.default.svc.cluster.local
+nslookup <any-service>.default.svc.cluster.local
+# Test external DNS
+nslookup google.com
+
+
+32. Use an ephemeral debug container (kubectl debug -it <pod> --image=busybox --target=<container>) to troubleshoot a no-shell/distroless container
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: distroless-pod
+spec:
+  containers:
+  - name: app
+    image: docker.io/library/nginx:1.25
+
+kubectl apply -f distroless-pod.yaml
+kubectl exec -it distroless-pod -- sh
+kubectl debug -it distroless-pod --image=docker.io/library/busybox:1.36 --target=app
+ps aux
+
+# Check network
+wget -qO- localhost:80
+
+# Check filesystem
+ls /
+cat /etc/nginx/nginx.conf
+
+# Exit
+exit
+
+33. Spin up a throwaway kubectl run tmp --rm -it --image=busybox pod to test connectivity to a Service from inside the cluster
+
+
+# Create a service to test against
+kubectl create deployment webserver --image=docker.io/library/nginx:1.25
+kubectl expose deployment webserver --port=80 --name=webserver-svc
+# Spin up throwaway pod and test
+kubectl run tmp --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- sh
+# Inside pod:
+wget -qO- webserver-svc.default.svc.cluster.local
+nslookup webserver-svc.default.svc.cluster.local
+nc -zv webserver-svc.default.svc.cluster.local 80
+# Exit — pod auto-deleted
+exit
+
+34. A node shows NotReady. List what you'd check (kubelet, disk pressure, CNI) and inspect it on minikube with kubectl describe node and sudo minikube logs.
+
+
+# Check node status
+kubectl get nodes
+# STATUS: NotReady
+# Full node details
+kubectl describe node minikube
+# Look for these in describe output:
+# Conditions section:
+# - MemoryPressure
+# - DiskPressure
+# - PIDPressure
+# - Ready = False
+# Check events on node
+kubectl get events --field-selector involvedObject.name=minikube
+# Check minikube logs
+minikube logs | tail -50
+# Check kubelet status
+minikube ssh "sudo systemctl status kubelet"
+# Check kubelet logs
+minikube ssh "sudo journalctl -u kubelet -n 50"
+# Check CNI
+minikube ssh "ls /etc/cni/net.d/"
+
+Common causes: kubelet crashed, disk full, CNI misconfigured, OOM on node.
+
+
+35. A pod is stuck Terminating. Explain finalizers and the grace period, then force-delete it (--grace-period=0 --force) and state the risks
+
+# Create a pod
+kubectl run stuck-pod --image=docker.io/library/nginx:1.25
+# Delete normally
+kubectl delete pod stuck-pod
+# if stuck in Terminating...
+# Check finalizers
+kubectl get pod stuck-pod -o yaml | grep finalizers
+# Force delete
+kubectl delete pod stuck-pod --grace-period=0 --force
+# If finalizers blocking — remove them
+kubectl patch pod stuck-pod -p '{"metadata":{"finalizers":null}}'
+
+Explanation:
+Grace period — when you delete a pod, Kubernetes sends SIGTERM and waits 30 seconds (default) for the app to shut down cleanly before sending SIGKILL. If the app doesn't respond it stays Terminating.
+Finalizers — hooks that must complete before deletion is allowed (e.g. releasing volumes, deregistering from load balancer). If a finalizer hangs, pod stays Terminating forever.
+Risks of force delete:
+Data corruptionapp - didn't flush writes before killed
+Duplicate pods - old and new pod running simultaneously
+Volume not released - PVC may stay attached to deleted pod
+Finalizers skipped - cleanup hooks never ran
+
+36. Given a manifest with the wrong apiVersion/kind pairing (e.g. apps/v1 + Pod), explain the validation error and correct the group/version.
+
+apiVersion: apps/v1
+kind: Pod
+metadata:
+  name: wrong-api-pod
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+
+kubectl apply -f wring-api-pod.yaml
+
+# Error returned:
+# Error from server (BadRequest): error when creating "STDIN":
+# Pod in version "v1" cannot be handled as a Pod:
+# no kind "Pod" is registered for version "apps/v1"
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: wrong-api-pod
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+
+kubectl apply -f wring-api-pod.yaml
+
+
+When you use the wrong apiVersion for a kind, Kubernetes API server immediately rejects the manifest because each resource type is registered under a specific group and version. For example, Pod belongs to the core API group v1, not apps/v1 which is reserved for workload controllers like Deployment and StatefulSet. The error message tells you exactly what's wrong — it cannot find the kind registered under that version.
+
+
+37. A pod fails with CreateContainerConfigError because a configMapKeyRef key is missing. Diagnose and fix.
+
+kubectl create configmap myconfig --from-literal=color=blue
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configerror-pod
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+    env:
+    - name: MY_VAR
+      valueFrom:
+        configMapKeyRef:
+          name: myconfig
+          key: missingkey
+
+kubectl apply -f configerror-pod.yaml
+# Check status
+kubectl get pod configerror-pod
+# STATUS: CreateContainerConfigError
+
+# Diagnose
+kubectl describe pod configerror-pod | grep -A10 Events
+# couldn't find key missingkey in ConfigMap default/myconfig
+
+# Check available keys
+kubectl get configmap myconfig -o yaml
+kubectl delete pod configerror-pod
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: configerror-pod
+spec:
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+    env:
+    - name: MY_VAR
+      valueFrom:
+        configMapKeyRef:
+          name: myconfig
+          key: color
+
+kubectl apply -f configerror-pod.yaml
+kubectl get pod configerror-pod
+
+38. A pod can't mount a Secret that lives in a different namespace. Explain namespace scoping and fix it.
+
+
+# Create secret in namespace ns-a
+kubectl create namespace ns-a
+kubectl create secret generic mysecret --from-literal=password=secret123 -n ns-a
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: secret-scope-pod
+spec:
+  volumes:
+  - name: secret-vol
+    secret:
+      secretName: mysecret
+  containers:
+  - name: nginx
+    image: docker.io/library/nginx:1.25
+    volumeMounts:
+    - name: secret-vol
+      mountPath: /secrets
+
+kubectl apply -f secret-scope-pod.yaml
+# Check status
+kubectl get pod secret-scope-pod
+# STATUS: Pending
+# Diagnose
+kubectl describe pod secret-scope-pod | grep -A10 Events
+# secret "mysecret" not found
+# Fix — recreate secret in same namespace as pod
+kubectl create secret generic mysecret --from-literal=password=secret123
+# Verify
+kubectl get pod secret-scope-pod
+
+Explanation: Secrets are namespace-scoped — a pod can only mount Secrets that exist in the same namespace. There is no cross-namespace secret mounting in vanilla Kubernetes. The fix is always to recreate the Secret in the same namespace as the pod.
+
+
+39. A rollout is stuck with ProgressDeadlineExceeded. Use kubectl describe deployment / rollout status to find the cause and remediate
+
+
+# Create deployment with bad image
+kubectl create deployment stuck-deploy --image=docker.io/library/nginx:1.25
+# Update to non-existent image
+kubectl set image deployment/stuck-deploy nginx=docker.io/library/nginx:nonexistent
+# Watch rollout get stuck
+kubectl rollout status deployment/stuck-deploy
+# Waiting for deployment "stuck-deploy" to finish...
+# error: progress deadline exceeded
+# Diagnose
+kubectl describe deployment stuck-deploy | grep -A10 Conditions
+# Type: Progressing
+# Reason: ProgressDeadlineExceeded
+kubectl describe deployment stuck-deploy | grep -A10 Events
+# pods failing to pull image
+kubectl get pods -l app=stuck-deploy
+# STATUS: ImagePullBackOff
+# Remediate option 1 — rollback to previous
+kubectl rollout undo deployment/stuck-deploy
+# Remediate option 2 — fix the image
+kubectl set image deployment/stuck-deploy nginx=docker.io/library/nginx:1.25
+# Verify
+kubectl rollout status deployment/stuck-deploy
+kubectl get pods -l app=stuck-deploy
+
+
+Explanation: ProgressDeadlineExceeded means the rollout didn't complete within the deadline (default 600 seconds). The old pods keep serving traffic while new pods fail — Kubernetes never cuts over until the new pods are Ready.
+
+
+40. Catch indentation/field typos (e.g. imagePullpolicy, misnested ports) before applying with kubectl apply --dry-run=server / --validate=true, then fix them
+
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: typo-deploy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: typo
+  template:
+    metadata:
+      labels:
+        app: typo
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+        imagePullpolicy: IfNotPresent    # typo — capital P missing
+        ports:
+        name: http                        # misnested — should be under - containerPort
+        containerPort: 80
+
+#kubectl apply -f broken.yaml
+kubectl apply --dry-run=server -f broken.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: typo-deploy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: typo
+  template:
+    metadata:
+      labels:
+        app: typo
+    spec:
+      containers:
+      - name: nginx
+        image: docker.io/library/nginx:1.25
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 80
+
+# Validate again
+kubectl apply --dry-run=server -f broken.yaml
+
+# Apply for real
+kubectl apply -f broken.yaml
+kubectl get pods -l app=typo
+
+
+
+41. An app's logs say it can't reach its database Service. Verify in order: pod running → Service exists → endpoints populated → DNS resolves → correct port — and identify the broken link.
+
+# Create deployment and broken service (wrong selector)
+kubectl create deployment mydb --image=docker.io/library/nginx:1.25
+
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: mydb-svc
+spec:
+  selector:
+    app: wronglabel
+  ports:
+  - port: 5432
+
+kubectl apply -f mydb-svc.yaml
+# Step 1 — pod running?
+kubectl get pods -l app=mydb
+# 1/1 Running ✓
+
+# Step 2 — service exists?
+kubectl get service mydb-svc
+# exists ✓
+
+# Step 3 — endpoints populated?
+kubectl get endpoints mydb-svc
+# ENDPOINTS: <none>  ← broken link found here
+
+# Step 4 — DNS resolves?
+kubectl run tmp --image=docker.io/library/busybox:1.36 --rm -it --restart=Never -- nslookup mydb-svc.default.svc.cluster.local
+# resolves but no backend
+
+# Step 5 — correct port?
+kubectl describe service mydb-svc | grep Port
+
+# Fix — correct the selector
+kubectl patch service mydb-svc -p '{"spec":{"selector":{"app":"mydb"}}}'
+
+# Verify endpoints now populated
+kubectl get endpoints mydb-svc
+
+42. Read a container's state/lastState and restartCount with kubectl get pod -o jsonpath to determine the root cause of repeated restarts.
+
+# Create a crashlooping pod
+kubectl run restart-pod --image=docker.io/library/busybox -- sh -c "exit 1"
+
+# Wait for restarts
+kubectl get pod restart-pod
+
+# Read restartCount
+kubectl get pod restart-pod -o jsonpath='{.status.containerStatuses[0].restartCount}'
+
+# Read current state
+kubectl get pod restart-pod -o jsonpath='{.status.containerStatuses[0].state}'
+
+# Read lastState (previous crash)
+kubectl get pod restart-pod -o jsonpath='{.status.containerStatuses[0].lastState}'
+
+# Read exit code from lastState
+kubectl get pod restart-pod -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'
+
+# Read reason
+kubectl get pod restart-pod -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'
+
+# All in one
+kubectl get pod restart-pod -o jsonpath='{
+  "restartCount: "}{.status.containerStatuses[0].restartCount}
+  {"\nreason: "}{.status.containerStatuses[0].lastState.terminated.reason}
+  {"\nexitCode: "}{.status.containerStatuses[0].lastState.terminated.exitCode}'
+
+
+43. Compare OpenShift Route to Ingress.
+
+Ingress is the standard Kubernetes way to expose HTTP/HTTPS services — it requires a separately installed ingress controller (nginx, traefik) to actually work. You define rules for routing traffic based on hostname or path.
+OpenShift Route is OpenShift's built-in equivalent — it works out of the box with the HAProxy router that comes pre-installed. It supports the same hostname/path routing but also adds TLS termination, edge/passthrough/reencrypt modes, and automatic certificate management.
+
+Summary: Route is more feature-rich and works out of the box on OpenShift, while Ingress is the portable standard that works on any Kubernetes cluster but needs extra setup.
+
+
+
+
+
