@@ -1,0 +1,157 @@
+==========================================================================
+ KUBERNETES POD ERRORS - QUICK REFERENCE (logs + describe)
+==========================================================================
+ Workflow for ANY broken pod:
+   1. kubectl get pod <pod>                      -> read STATUS
+   2. kubectl logs <pod>  (or --previous)        -> app-level error
+   3. kubectl describe pod <pod> | grep -A10 Events   -> k8s-level error
+==========================================================================
+
+
+--------------------------------------------------------------------------
+ EXIT CODES (seen in describe / -o yaml lastState.terminated.exitCode)
+--------------------------------------------------------------------------
+   0     Clean exit. Container had no long-running command and finished.
+   1     General application error (app threw/exited 1).
+   125   Container runtime failed to run.
+   126   Command found but not executable (permissions).
+   127   Command not found (bad binary / wrong PATH).
+   137   OOMKilled = out of memory (128 + 9 SIGKILL). Memory limit too low.
+   139   Segfault (128 + 11 SIGSEGV).
+   143   SIGTERM (128 + 15). Graceful stop / killed by signal.
+
+
+==========================================================================
+ STATUS = ImagePullBackOff  /  ErrImagePull
+==========================================================================
+ Cause   : Image typo, missing tag, or private registry with no pull secret.
+ describe: Failed to pull image "...": manifest unknown / not found
+ logs    : (none - container never started)
+ Fix     : kubectl set image pod/<pod> <container>=docker.io/library/nginx:1.25
+           (or add an imagePullSecret for private registries)
+
+
+==========================================================================
+ STATUS = CrashLoopBackOff
+==========================================================================
+ Cause   : Container starts then exits repeatedly (bad cmd, app crash,
+           or no long-running process).
+ describe: Back-off restarting failed container
+ logs    : kubectl logs <pod> --previous   <- reads the LAST crash
+ Check   : kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].restartCount}'
+ Fix     : Give it a real command, e.g.
+           kubectl run <pod> --image=docker.io/library/busybox -- sleep 3600
+
+
+==========================================================================
+ STATUS = Completed  (then CrashLoopBackOff)
+==========================================================================
+ Cause   : Image (busybox/ubuntu/alpine) has no default long-running
+           process - starts, has nothing to do, exits 0. k8s restarts it.
+ exitCode: 0  (clean exit, NOT a crash)
+ logs    : empty
+ Fix     : Add command: ["sleep", "3600"]   (keeps container alive)
+
+
+==========================================================================
+ STATUS = OOMKilled  (in lastState)
+==========================================================================
+ Cause   : Container exceeded its memory limit.
+ exitCode: 137
+ describe: kubectl describe pod <pod> | grep -i oom
+ yaml    : kubectl get pod <pod> -o yaml | grep -A5 lastState   -> reason: OOMKilled
+ Fix     : Raise the limit (e.g. 5Mi -> 128Mi) or fix the leaking app.
+
+
+==========================================================================
+ STATUS = CreateContainerConfigError
+==========================================================================
+ Cause   : configMapKeyRef / secretKeyRef points to a key that doesn't exist.
+ describe: couldn't find key <missingkey> in ConfigMap default/<name>
+ Check   : kubectl get configmap <name> -o yaml   (list valid keys)
+ Fix     : Reference an existing key, or recreate the ConfigMap/Secret.
+
+
+==========================================================================
+ STATUS = Pending
+==========================================================================
+ Cause   : Scheduler can't place the pod. describe Events shows which:
+ describe: 0/1 nodes available: node(s) didn't match nodeSelector
+           0/1 nodes available: Insufficient cpu / Insufficient memory
+           0/1 nodes available: pod has unbound immediate PersistentVolumeClaims
+ Fix (by cause):
+   nodeSelector  -> kubectl label node minikube <key>=<value>
+   resources     -> lower requests (cpu:100m, memory:64Mi) or check
+                    kubectl describe node minikube | grep -A10 Capacity
+   PVC missing   -> kubectl apply -f pvc.yaml
+
+
+==========================================================================
+ STATUS = ContainerCreating (stuck)  ->  FailedMount
+==========================================================================
+ Cause   : Pod mounts a PVC / Secret / ConfigMap that doesn't exist,
+           OR Secret is in a different namespace (secrets are namespace-scoped).
+ describe: persistentvolumeclaim "<name>" not found
+           secret "<name>" not found
+ Fix     : Create the missing PVC/Secret in the SAME namespace as the pod.
+
+
+==========================================================================
+ STATUS = Terminating (stuck)
+==========================================================================
+ Cause   : Grace period (default 30s SIGTERM->SIGKILL) or a hung finalizer.
+ Check   : kubectl get pod <pod> -o yaml | grep finalizers
+ Fix     : kubectl delete pod <pod> --grace-period=0 --force
+           kubectl patch pod <pod> -p '{"metadata":{"finalizers":null}}'
+ Risks   : data corruption, duplicate pods, volume not released, hooks skipped.
+
+
+==========================================================================
+ READY = 0/1  (pod Running but never Ready)
+==========================================================================
+ Cause   : Readiness probe failing (wrong path/port).
+ describe: Readiness probe failed: HTTP probe failed with statuscode: 404
+ Fix     : Correct the probe path/port (e.g. /wrongpath -> /).
+
+
+==========================================================================
+ VALIDATION ERRORS (kubectl apply rejects before pod is created)
+==========================================================================
+ Indentation typo:
+   error converting YAML to JSON: yaml: line N: mapping values are not
+   allowed in this context        -> line number = where indentation broke
+
+ Selector mismatch (Deployment):
+   spec.template.metadata.labels: Invalid value ...: `selector` does not
+   match template `labels`         -> make matchLabels == template labels
+
+ Wrong apiVersion/kind pair:
+   no kind "Pod" is registered for version "apps/v1"
+   -> Pod is core v1; apps/v1 is for Deployment/StatefulSet/DaemonSet
+
+ Field typo / misnested (catch before apply):
+   kubectl apply --dry-run=server -f file.yaml
+   (e.g. imagePullpolicy -> imagePullPolicy; ports under '- containerPort')
+
+
+==========================================================================
+ SERVICE RETURNS NOTHING  (not a pod status, but common)
+==========================================================================
+ Cause   : Service selector doesn't match pod labels.
+ Check   : kubectl get endpoints <svc>     -> ENDPOINTS: <none>
+ Fix     : kubectl patch service <svc> -p '{"spec":{"selector":{"app":"<correct>"}}}'
+
+ Diagnose order: pod Running -> Service exists -> endpoints populated ->
+                 DNS resolves -> correct port.
+
+
+--------------------------------------------------------------------------
+ HANDY DIAGNOSIS ONE-LINERS
+--------------------------------------------------------------------------
+ kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].restartCount}'
+ kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].lastState.terminated.exitCode}'
+ kubectl get pod <pod> -o jsonpath='{.status.containerStatuses[0].lastState.terminated.reason}'
+ kubectl get events --sort-by=.lastTimestamp
+ kubectl get events --field-selector involvedObject.name=<pod>
+ kubectl logs <pod> --previous
+==========================================================================
