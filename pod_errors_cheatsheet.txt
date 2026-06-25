@@ -1,3 +1,10 @@
+
+kubernetes.io — the most useful by far. Everything kubectl, Pods, Deployments, Services, storage (PV / PVC / StorageClass), probes. Search box is top-right. The one page worth knowing: search "cheat sheet" there → it's the official kubectl quick reference, with imperative commands for almost everything.
+docs.docker.com — Docker CLI, docker compose, and the Swarm overview (relevant to your LO6). Has a CLI reference and a Compose-file reference.
+docs.podman.io — podman commands, rootless/daemonless details.
+minikube.sigs.k8s.io — minikube start, addons, profiles.
+rha.ole.redhat.com — Red Hat Academy material for the OpenShift / oc side.
+
 ==========================================================================
  KUBERNETES POD ERRORS - QUICK REFERENCE (logs + describe)
 ==========================================================================
